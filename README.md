@@ -2,15 +2,17 @@
 
 **Objective**: Provision PowerProtect Data Domain, PowerProtect Data Manager and configure initial settings
 
+
 **Prerequisite**: This is setup and tested on a CentOS VM with following installed
 1. GCP SDK
 2. Terraform
 3. Ansible
 
+
 **Steps**:
-># terraform init
-># terraform plan
-># terraform apply
+- terraform init
+- terraform plan
+- terraform apply
 
 
 **Outcome**: 
