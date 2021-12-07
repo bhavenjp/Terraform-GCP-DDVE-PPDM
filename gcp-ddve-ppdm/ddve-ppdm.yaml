@@ -1,0 +1,376 @@
+- name: DDVE and PPDM Configuration
+  hosts: localhost
+  gather_facts: no
+  connection: local
+
+  vars_files:
+    - ./gcp_tf_ddve-ppdm_ansible_vars_file.yaml
+  vars:
+    DDVE_IP: "{{ tf_ddve_external_ip }}"
+    DDVE_DEFAULT_PASSWORD: "{{ tf_ddve_instance_id }}"
+    DDVE_USER: sysadmin
+    DDVE_PASSWORD: "{{ tf_ddve_password }}"
+    DDVE_PASSPHRASE: "{{ tf_ddve_password }}"
+    DDVE_URI_1: https://{{ DDVE_IP }}:3009/rest/v1.0
+    DDVE_URI_3: https://{{ DDVE_IP }}:3009/rest/v3.0
+    DDVE_URI_API: https://{{ DDVE_IP }}:3009/api/v1
+    PPDM_IP: "{{ tf_ppdm_external_ip }}"
+    PPDM_USER: admin
+    PPDM_DEFAULT_PASSWORD: "{{ PPDM_USER }}"
+    PPDM_COMMON_PASSWORD: "{{ tf_ppdm_common_password }}"
+    PPDM_URI_2: https://{{ PPDM_IP }}:8443/api/v2
+    DDVE_INTERNAL_IP: "{{ tf_ddve_internal_ip }}"
+    DDVE_HOSTNAME: "{{ tf_ddve_hostname }}"
+
+  tasks:
+  - name: Wait for DDVE to come online
+    wait_for:
+      host: "{{ DDVE_IP }}"
+      port: 443
+      state: started
+      delay: 1
+      sleep: 60
+      timeout: 600
+
+  - name: Authenticate and retrieve DDVE token
+    uri:
+      validate_certs: false
+      url: "{{ DDVE_URI_1 }}/auth"
+      method: POST
+      headers:
+        Content-Type: application/json
+      body_format: json
+      body:
+        username: "{{ DDVE_USER }}"
+        password: "{{ DDVE_DEFAULT_PASSWORD }}"
+      status_code: 201
+      return_content: true
+    register: ddveauth
+
+  - name: Set sysadmin password
+    uri:
+      validate_certs: false
+      url: "{{ DDVE_URI_1 }}/dd-systems/0/users/sysadmin"
+      method: PUT
+      headers:
+          X-DD-AUTH-TOKEN: "{{ ddveauth.x_dd_auth_token }}"
+          Content-Type: 'application/json'
+      body_format: json
+      body:
+        new_password: "{{ DDVE_PASSWORD }}"
+        current_password: "{{ DDVE_DEFAULT_PASSWORD }}"
+      status_code: 200
+      return_content: true
+    register: ddvepassword
+
+  - name: Set passphrase
+    uri:
+      validate_certs: false
+      url: "{{ DDVE_URI_3 }}/dd-systems/0/systems"
+      method: PUT
+      headers:
+          X-DD-AUTH-TOKEN: "{{ ddveauth.x_dd_auth_token }}"
+          Content-Type: 'application/json'
+      body_format: json
+      body: |
+        {
+          "operation": "set_pphrase",
+          "pphrase_request": {
+            "new_pphrase": "{{ DDVE_PASSPHRASE }}"
+          }
+        }
+      status_code: 200
+      return_content: true
+    register: ddvepassphrase
+
+  - name: Add block storage device
+    uri:
+      validate_certs: false
+      url: "{{ DDVE_URI_API }}/dd-systems/0/file-systems/block-storages"
+      method: PUT
+      headers:
+          X-DD-AUTH-TOKEN: "{{ ddveauth.x_dd_auth_token }}"
+          Content-Type: 'application/json'
+      body_format: json
+      body: { "disks": [ "dev3" ] }
+      status_code: 200
+      return_content: true
+    register: ddveblockstorage
+
+  - name: Create filesystem
+    uri:
+      validate_certs: false
+      url: "{{ DDVE_URI_1 }}/dd-systems/0/file-systems"
+      method: PUT
+      headers:
+          X-DD-AUTH-TOKEN: "{{ ddveauth.x_dd_auth_token }}"
+          Content-Type: 'application/json'
+      body_format: json
+      body: { "operation": "create" }
+      status_code: 200
+      return_content: true
+      timeout: 600
+    register: ddvefilesystemcreate
+
+  - name: Enable filesystem
+    uri:
+      validate_certs: false
+      url: "{{ DDVE_URI_1 }}/dd-systems/0/file-systems"
+      method: PUT
+      headers:
+          X-DD-AUTH-TOKEN: "{{ ddveauth.x_dd_auth_token }}"
+          Content-Type: 'application/json'
+      body_format: json
+      body: { "operation": "enable" }
+      status_code: 200
+      return_content: true
+      timeout: 600
+    register: ddvefilesystemenable
+
+  - name: Enable DDBoost
+    uri:
+      validate_certs: false
+      url: "{{ DDVE_URI_1 }}/dd-systems/0/protocols/ddboost"
+      method: PUT
+      headers:
+          X-DD-AUTH-TOKEN: "{{ ddveauth.x_dd_auth_token }}"
+          Content-Type: 'application/json'
+      body_format: json
+      body: { "operation": "enable" }
+      status_code: 200
+      return_content: true
+    register: rest_ddboost
+
+  - name: "Wait for PPDM to come online"
+    wait_for:
+      host: "{{ PPDM_IP }}"
+      port: 443
+      state: started
+      delay: 1
+      sleep: 60
+      timeout: 600
+    register: waitforppdm
+
+  - name: "Authenticate and get PPDM Token"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/login"
+      method: POST
+      body_format: json
+      body:
+        username: "{{ PPDM_USER }}"
+        password: "{{ PPDM_DEFAULT_PASSWORD }}"
+      status_code: 200
+      return_content: true
+    register: ppdmtoken
+
+  - name: "Accept PPDM EULA"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/eulas/PPDM"
+      method: PATCH
+      headers:
+        Authorization: "Bearer {{ ppdmtoken.json.access_token }}"
+        Content-Type: "application/json"
+      body_format: json
+      body: { "accepted":true }
+      status_code: 200
+      return_content: true
+    register: ppdmeula
+
+  - name: "Get initial PPDM config info"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/configurations"
+      method: GET
+      headers:
+        Authorization: "Bearer {{ ppdmtoken.json.access_token }}"
+        Content-Type: "application/json"
+      body_format: json
+      return_content: true
+    register: config
+
+  - name: "Start initial PPDM configuration"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/configurations/{{ config.json.content[0].id }}"
+      method: PUT
+      headers:
+        Authorization: "Bearer {{ ppdmtoken.json.access_token }}"
+        Content-Type: "application/json"
+      body_format: json
+      body: |
+          {
+            "id": "{{ config.json.content[0].id }}",
+            "nodeId": "{{ config.json.content[0].nodeId }}",
+            "configType": "standalone",
+            "gettingStartedCompleted": false,
+            "autoSupport": false,
+            "integratedStorageSecuritySetupCompleted": false,
+            "deployedPlatform": "{{ config.json.content[0].deployedPlatform }}",
+            "applicationUserPassword": "{{ PPDM_COMMON_PASSWORD }}",
+            "networks": [
+                {
+                    "fqdn": "{{ config.json.content[0].networks[0].fqdn }}",
+                    "ipAddress": [
+                        "{{ config.json.content[0].networks[0].ipAddress[0] }}"
+                    ],
+                    "ipAddressFamily": "{{ config.json.content[0].networks[0].ipAddressFamily }}",
+                    "interfaceName": "{{ config.json.content[0].networks[0].interfaceName }}",
+                    "netMask": "{{ config.json.content[0].networks[0].netMask }}",
+                    "gateway": "{{ config.json.content[0].networks[0].gateway }}",
+                    "dnsServers": [
+                        "{{ config.json.content[0].networks[0].dnsServers[0] }}"
+                    ],
+                    "nslookupSuccess": true
+                },
+                {
+                    "ipAddress": [
+                        "{{ config.json.content[0].networks[1].ipAddress[0] }}"
+                    ],
+                    "ipAddressFamily": "{{ config.json.content[0].networks[1].ipAddressFamily }}",
+                    "interfaceName": "{{ config.json.content[0].networks[1].interfaceName }}",
+                    "netMask": "{{ config.json.content[0].networks[1].netMask }}"
+                }
+            ],
+            "ntpServers": [],
+            "timeZone": "{{ config.json.content[0].timeZone }}",
+            "osUsers": [
+                {
+                    "userName": "root",
+                    "description": "OS root user account",
+                    "numberOfDaysToExpire": 60,
+                    "password": "xx",
+                    "newPassword": "{{ PPDM_COMMON_PASSWORD }}"
+                },
+                {
+                    "userName": "admin",
+                    "description": "OS administrator user account",
+                    "numberOfDaysToExpire": 60,
+                    "password": "xx",
+                    "newPassword": "{{ PPDM_COMMON_PASSWORD }}"
+                },
+                {
+                    "userName": "support",
+                    "description": "OS support user account",
+                    "numberOfDaysToExpire": 60,
+                    "password": "xx",
+                    "newPassword": "{{ PPDM_COMMON_PASSWORD }}"
+                }
+            ],
+            "lockbox": {
+                "name": "Lockbox",
+                "lastUpdatedTime": "{{ config.json.content[0].lockbox.lastUpdatedTime }}",
+                "passphrase": "xx",
+                "newPassphrase": "{{ PPDM_COMMON_PASSWORD }}"
+            }
+          }
+      status_code: 202
+      return_content: true
+    register: start_config
+
+  - name: "Check for PPDM config completion"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/configurations/{{ config.json.content[0].id }}/config-status"
+      method: GET
+      headers:
+        Authorization: " Bearer {{ ppdmtoken.json.access_token }}"
+        Content-Type: "application/json"
+      body_format: json
+      return_content: true
+    register: monitor
+    until: monitor.status == 200 and monitor.json.percentageCompleted == 100
+    retries: 60
+    delay: 30
+
+  - name: "Get Data Domain certificate"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/certificates?host={{ DDVE_INTERNAL_IP }}&port=3009&type=Host"
+      method: GET
+      headers:
+        Authorization: "Bearer {{ ppdmtoken.json.access_token }}"
+        Content-Type: "application/json"
+      body_format: json
+      status_code: 200
+      return_content: true
+    register: dd_cert
+    until: dd_cert.status == 200
+    retries: 90
+    delay: 10
+
+  - name: "Accept Data Domain certificate"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/certificates/{{ dd_cert.json[0].id }}"
+      method: PUT
+      headers:
+        Authorization: "Bearer {{ ppdmtoken.json.access_token }}"
+        Content-Type: "application/json"
+      body_format: json
+      body: |
+          {
+            "fingerprint": "{{ dd_cert.json[0].fingerprint }}",
+            "host": "{{ dd_cert.json[0].host }}",
+            "id": "{{ dd_cert.json[0].id }}",
+            "issuerName": "{{ dd_cert.json[0].issuerName }}",
+            "notValidAfter": "{{ dd_cert.json[0].notValidAfter }}",
+            "notValidBefore": "{{ dd_cert.json[0].notValidBefore }}",
+            "port": "{{ dd_cert.json[0].port }}",
+            "state": "ACCEPTED",
+            "subjectName": "{{ dd_cert.json[0].subjectName }}",
+            "type": "{{ dd_cert.json[0].type }}"
+          }
+      status_code: 200
+      return_content: true
+    register: accept_dd_cert
+    until: accept_dd_cert.status == 200
+    retries: 90
+    delay: 10
+
+  - name: "Create Data Domain credential"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/credentials"
+      method: POST
+      headers:
+        Authorization: "Bearer {{ ppdmtoken.json.access_token }}"
+        Content-Type: "application/json"
+      body_format: json
+      body: |
+          {
+              "type": "DATADOMAIN",
+              "username": "sysadmin",
+              "password": "{{ DDVE_PASSWORD }}",
+              "name": "SYSADMIN"
+          }
+      status_code: [200,201,403]
+      return_content: true
+    register: dd_creds
+    until: dd_creds.status == 200 or dd_creds.status == 201 or dd_creds.status == 403
+    retries: 90
+    delay: 10
+
+  - name: "Add Data Domain as target storage"
+    uri:
+      validate_certs: false
+      url: "{{ PPDM_URI_2 }}/inventory-sources"
+      headers:
+        Authorization: "Bearer {{ ppdmtoken.json.access_token }}"
+        Content-Type: "application/json"
+      method: POST
+      body_format: json
+      body: |
+          {
+            "type": "EXTERNALDATADOMAIN",
+            "name": "{{ DDVE_HOSTNAME }}",
+            "port": 3009,
+            "credentials": {
+              "id": "{{ dd_creds.json.id }}"
+            },
+            "address": "{{ DDVE_INTERNAL_IP }}"
+          }
+      status_code: 201
+      return_content: true
+    register: storage
